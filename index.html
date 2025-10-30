@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Word Weaver: Graveyard Spellcraft</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Creepster&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --text-color: #e0e0e0;
+            --primary-color: #8b5cf6; /* Violet-500 */
+            --accent-color: #fca5a5; /* Red-300 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .creepster {
+            font-family: 'Creepster', cursive;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.7);
+        }
+        .container {
+            width: 100%;
+            max-width: 900px;
+            background-color: #262626;
+            border: 4px solid var(--primary-color);
+            border-radius: 1rem;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5);
+            padding: 2rem;
+        }
+        .card {
+            background-color: #3f3f46; /* Gray-700 */
+            border-radius: 0.75rem;
+            padding: 1rem;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6);
+            margin-bottom: 1rem;
+        }
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: bold;
+            transition: transform 0.1s, box-shadow 0.1s;
+        }
+        .btn-primary:hover {
+            background-color: #7c3aed; /* Violet-600 */
+            transform: translateY(-1px);
+            box-shadow: 0 2px 5px rgba(139, 92, 246, 0.5);
+        }
+        .btn-secondary {
+            background-color: #525252;
+            color: var(--text-color);
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: bold;
+            transition: background-color 0.1s;
+        }
+        .btn-secondary:hover {
+            background-color: #404040;
+        }
+        input[type="text"], textarea {
+            background-color: #1a1a1a;
+            border: 1px solid #525252;
+            color: var(--text-color);
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+            width: 100%;
+        }
+        .text-accent {
+            color: var(--accent-color);
+        }
+    </style>
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, runTransaction, query, where, getDocs, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables will be set in initFirebase
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        window.GAME_ID = '';
+
+        /**
+         * Initializes Firebase app, handles authentication, and sets global variables.
+         */
+        window.initFirebase = async () => {
+            try {
+                // Set Firestore logging to Debug for better development visibility
+                setLogLevel('Debug');
+                
+                let firebaseConfig;
+                try {
+                    firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+                } catch (e) {
+                    console.error("Error parsing __firebase_config:", e);
+                    return;
+                }
+
+                if (!firebaseConfig.apiKey) {
+                    console.error("Firebase config is missing API key. Cannot initialize.");
+                    return;
+                }
+                
+                const app = initializeApp(firebaseConfig);
+                window.db = getFirestore(app);
+                window.auth = getAuth(app);
+
+                // Handle authentication
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(window.auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(window.auth);
+                }
+
+                onAuthStateChanged(window.auth, (user) => {
+                    if (user) {
+                        window.userId = user.uid;
+                        console.log("Authenticated with User ID:", window.userId);
+                        // Once authenticated, attempt to join the game if a group code is set
+                        const groupCode = document.getElementById('groupCodeInput').value;
+                        if (groupCode) {
+                            window.joinOrCreateGame(groupCode);
+                        } else {
+                            // Show initial setup screen
+                            document.getElementById('setupScreen').classList.remove('hidden');
+                        }
+                    } else {
+                        console.log("Authentication state changed: No user.");
+                        window.userId = null;
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+            }
+        };
+
+        // --- Firebase Data Operations ---
+
+        /**
+         * Generates the Firestore path for the public game document.
+         * @param {string} groupId The unique code for the game session.
+         * @returns {string} The document path.
+         */
+        window.getGameDocPath = (groupId) => {
+            // Path: /artifacts/{appId}/public/data/games/{groupId}
+            return `artifacts/${window.appId}/public/data/games/${groupId}`;
+        };
+        
+        /**
+         * Joins an existing game or creates a new one using a transaction for safety.
+         * @param {string} groupCode The unique code for the group session.
+         */
+        window.joinOrCreateGame = async (groupCode) => {
+            const sanitizedCode = groupCode.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+            if (!sanitizedCode) {
+                document.getElementById('messageBox').innerHTML = 'Please enter a valid Group Code (letters/numbers/dashes only).';
+                return;
+            }
+
+            // Set the global GAME_ID based on the sanitized code
+            window.GAME_ID = sanitizedCode;
+            const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
+            
+            document.getElementById('loadingIndicator').classList.remove('hidden');
+
+            try {
+                await runTransaction(window.db, async (transaction) => {
+                    const gameDoc = await transaction.get(gameDocRef);
+
+                    if (!gameDoc.exists()) {
+                        // CREATE NEW GAME
+                        const initialGameData = {
+                            groupCode: window.GAME_ID,
+                            currentWord: null,
+                            activePlayers: [window.userId],
+                            vocabIndex: 0,
+                            round: 1,
+                            totalScore: 0,
+                            gameStarted: false,
+                            statusMessage: 'Séance initialized. Waiting for players to start.',
+                            lastHint: null,
+                            prophecy: null,
+                            wordHistory: [],
+                            timestamp: Date.now()
+                        };
+                        transaction.set(gameDocRef, initialGameData);
+                        document.getElementById('messageBox').innerHTML = `New Séance created: **${window.GAME_ID}**.`;
+                    } else {
+                        // JOIN EXISTING GAME
+                        const data = gameDoc.data();
+                        
+                        // Check if the current user is already in the game
+                        if (!data.activePlayers.includes(window.userId)) {
+                            // Add current user to activePlayers array
+                            const updatedPlayers = [...data.activePlayers, window.userId];
+                            transaction.update(gameDocRef, { activePlayers: updatedPlayers });
+                        }
+                        document.getElementById('messageBox').innerHTML = `Joined existing Séance: **${window.GAME_ID}**.`;
+                    }
+                });
+
+                // Start listening to real-time updates after transaction success
+                window.listenToGame(gameDocRef);
+                document.getElementById('setupScreen').classList.add('hidden');
+                document.getElementById('gameScreen').classList.remove('hidden');
+                document.getElementById('currentGroupCode').textContent = window.GAME_ID;
+
+            } catch (e) {
+                console.error("Transaction failed: ", e);
+                document.getElementById('messageBox').innerHTML = 'Error joining/creating Séance. Check console for details.';
+            } finally {
+                document.getElementById('loadingIndicator').classList.add('hidden');
+            }
+        };
+
+        /**
+         * Sets up the real-time listener for the game document.
+         * @param {object} docRef The Firestore DocumentReference for the game.
+         */
+        window.listenToGame = (docRef) => {
+            if (!window.db || !window.userId) {
+                console.error("Firebase not ready for listener.");
+                return;
+            }
+
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const gameData = docSnap.data();
+                    window.renderGame(gameData);
+                } else {
+                    window.renderGame(null); // Game was deleted or never existed
+                }
+            }, (error) => {
+                console.error("Error listening to game:", error);
+            });
+        };
+
+        /**
+         * Renders the game state to the UI.
+         * @param {object | null} gameData The current state of the game.
+         */
+        window.renderGame = (gameData) => {
+            if (!gameData) {
+                document.getElementById('gameContainer').innerHTML = '<p class="text-center text-accent">Séance ended or lost connection. Please refresh.</p>';
+                return;
+            }
+
+            // Update UI elements based on gameData
+            document.getElementById('roundDisplay').textContent = gameData.round;
+            document.getElementById('scoreDisplay').textContent = gameData.totalScore;
+            document.getElementById('statusMessage').innerHTML = gameData.statusMessage || 'Awaiting next action...';
+            document.getElementById('playersList').textContent = `Members: ${gameData.activePlayers.length} (${gameData.activePlayers.join(', ').substring(0, 70)}...)`;
+
+            const wordDisplay = document.getElementById('currentWordDisplay');
+            const definitionDisplay = document.getElementById('currentDefinitionDisplay');
+            
+            if (gameData.gameStarted && gameData.currentWord) {
+                wordDisplay.textContent = `The Hidden Word: ${gameData.currentWord.word.split('').map(char => char === ' ' ? ' ' : '_').join(' ')}`;
+                definitionDisplay.textContent = gameData.currentWord.definition;
+                document.getElementById('wordGuessSection').classList.remove('hidden');
+                document.getElementById('startGameButton').classList.add('hidden');
+            } else if (gameData.gameStarted && !gameData.currentWord) {
+                // Should only happen between rounds, but ensure state is correct
+                wordDisplay.textContent = 'Preparing the next word...';
+                definitionDisplay.textContent = 'Please start the next round.';
+                document.getElementById('wordGuessSection').classList.add('hidden');
+            } else {
+                // Game not started
+                wordDisplay.textContent = 'The Word is Locked.';
+                definitionDisplay.textContent = 'The Council must initiate the séance.';
+                document.getElementById('wordGuessSection').classList.add('hidden');
+                document.getElementById('startGameButton').classList.remove('hidden');
+            }
+
+            // Render hints
+            document.getElementById('hintArea').innerHTML = gameData.lastHint ? 
+                `<p class="text-sm italic text-gray-400">Oracle's Hint: ${gameData.lastHint}</p>` :
+                '<p class="text-sm italic text-gray-400">The Oracle is silent. Ask for a hint to aid your focus.</p>';
+
+            // Render prophecy
+            document.getElementById('prophecyArea').innerHTML = gameData.prophecy ? 
+                `<p class="text-sm text-accent font-semibold">Prophecy: ${gameData.prophecy}</p>` :
+                '<p class="text-sm text-gray-400">The Elder Prophecy has not yet been invoked.</p>';
+        };
+
+
+        // --- Game Logic Actions (Executed by a single user, updating Firestore) ---
+
+        /**
+         * Starts the game by drawing the first word.
+         */
+        window.startGame = async () => {
+            const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
+            
+            // Check if game is already started via local UI check (to prevent immediate double-tap)
+            const startGameButton = document.getElementById('startGameButton');
+            startGameButton.disabled = true;
+
+            try {
+                await runTransaction(window.db, async (transaction) => {
+                    const gameDoc = await transaction.get(gameDocRef);
+                    if (!gameDoc.exists() || gameDoc.data().gameStarted) {
+                        return; // Already started
+                    }
+
+                    const nextWord = window.VOCABULARY[0];
+                    if (!nextWord) {
+                         // This is a safety check if VOCABULARY is empty
+                         transaction.update(gameDocRef, { 
+                            statusMessage: 'Error: No vocabulary words loaded.',
+                            gameStarted: true
+                         });
+                         return;
+                    }
+
+                    transaction.update(gameDocRef, {
+                        gameStarted: true,
+                        currentWord: { word: nextWord.word, definition: nextWord.definition },
+                        vocabIndex: 1,
+                        round: 1,
+                        statusMessage: `Séance begins! Round 1. Find the word matching this definition.`,
+                        lastHint: null,
+                        prophecy: null,
+                    });
+                });
+            } catch (e) {
+                console.error("Error starting game:", e);
+                document.getElementById('messageBox').innerHTML = 'Error starting game.';
+            } finally {
+                startGameButton.disabled = false;
+            }
+        };
+
+        /**
+         * Submits a guess for the current word.
+         */
+        window.submitGuess = async () => {
+            const guessInput = document.getElementById('guessInput');
+            const userGuess = guessInput.value.trim();
+            guessInput.value = '';
+
+            if (!userGuess) return;
+
+            const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
+            
+            try {
+                await runTransaction(window.db, async (transaction) => {
+                    const gameDoc = await transaction.get(gameDocRef);
+                    if (!gameDoc.exists()) return; 
+
+                    const data = gameDoc.data();
+                    if (!data.currentWord || !data.gameStarted) return;
+                    
+                    const correctWord = data.currentWord.word.toLowerCase();
+                    const sanitizedGuess = userGuess.toLowerCase();
+
+                    if (sanitizedGuess === correctWord) {
+                        // Correct Guess! Advance the game.
+                        const newScore = data.totalScore + 10;
+                        const newVocabIndex = data.vocabIndex + 1;
+                        const nextRound = data.round + 1;
+                        
+                        let updateData = {
+                            totalScore: newScore,
+                            round: nextRound,
+                            vocabIndex: newVocabIndex,
+                            lastHint: null,
+                            prophecy: null,
+                            wordHistory: [...data.wordHistory, data.currentWord.word]
+                        };
+
+                        if (newVocabIndex < window.VOCABULARY.length) {
+                            const nextWord = window.VOCABULARY[newVocabIndex];
+                            updateData.currentWord = { word: nextWord.word, definition: nextWord.definition };
+                            updateData.statusMessage = `Correct! +10 Points. Preparing Round ${nextRound}.`;
+                        } else {
+                            // Game Over
+                            updateData.currentWord = null;
+                            updateData.gameStarted = false;
+                            updateData.statusMessage = `Séance Complete! Final Score: ${newScore}. All ${window.VOCABULARY.length} words found.`;
+                        }
+
+                        transaction.update(gameDocRef, updateData);
+
+                    } else {
+                        // Incorrect Guess
+                        transaction.update(gameDocRef, {
+                            statusMessage: `Incorrect guess: "${userGuess}". The spirits demand more focus!`
+                        });
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error submitting guess:", e);
+            }
+        };
+
+
+        // --- Gemini API Functions ---
+
+        const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+        const apiKey = ""; // Canvas will provide this during runtime
+
+        /**
+         * Calls the Gemini API with exponential backoff for a response.
+         * @param {string} model The model name (e.g., gemini-2.5-flash-preview-09-2025)
+         * @param {object} payload The API payload
+         * @param {number} retries Current retry count
+         * @returns {Promise<object>} The JSON response from the API.
+         */
+        async function fetchGemini(model, payload, retries = 0) {
+            const url = `${GEMINI_API_URL}/${model}:generateContent?key=${apiKey}`;
+            const delay = 2 ** retries * 1000;
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    if (response.status === 429 && retries < 5) { // Too Many Requests
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        return fetchGemini(model, payload, retries + 1);
+                    }
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const result = await response.json();
+                const text = result.candidates?.[0]?.content?.parts?.[0]?.text || 'Error: Could not retrieve response.';
+                return { text };
+
+            } catch (error) {
+                console.error(`Gemini API call failed after ${retries} retries:`, error);
+                return { text: 'The spirits are too faint to hear. Try again.' };
+            }
+        }
+
+
+        /**
+         * Generates a hint for the current word using Gemini.
+         */
+        window.getOracleHint = async () => {
+            const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
+            const hintButton = document.getElementById('hintButton');
+            hintButton.disabled = true;
+
+            try {
+                // Get the current game state
+                const gameDoc = await getDoc(gameDocRef);
+                if (!gameDoc.exists() || !gameDoc.data().currentWord) {
+                    document.getElementById('messageBox').innerHTML = 'No word is active to receive a hint.';
+                    hintButton.disabled = false;
+                    return;
+                }
+                const currentDefinition = gameDoc.data().currentWord.definition;
+
+                // System Instruction: Act as a mysterious, cryptic Oracle.
+                // User Prompt: Create a one-sentence, highly cryptic, alliterative hint for a word defined as: [Definition]. Do not use the word itself.
+                const systemPrompt = "You are the Cryptic Oracle. Your hints must be a single sentence, highly alliterative, and deeply mysterious. Do not reveal the correct answer.";
+                const userQuery = `Create a one-sentence, alliterative, and cryptic hint for a word defined as: "${currentDefinition}". The hint must not use the word itself.`;
+                
+                const payload = {
+                    contents: [{ parts: [{ text: userQuery }] }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                };
+                
+                document.getElementById('messageBox').innerHTML = 'Consulting the Oracle...';
+                const { text: hintText } = await fetchGemini('gemini-2.5-flash-preview-09-2025', payload);
+
+                // Update Firestore with the new hint
+                await updateDoc(gameDocRef, {
+                    lastHint: hintText,
+                    statusMessage: 'The Oracle has provided a cryptic sign. Consult the message board.'
+                });
+
+                document.getElementById('messageBox').innerHTML = 'Hint received.';
+
+            } catch (e) {
+                console.error("Error getting hint:", e);
+                document.getElementById('messageBox').innerHTML = 'Failed to connect to the Oracle.';
+            } finally {
+                hintButton.disabled = false;
+            }
+        };
+
+        /**
+         * Generates a prophecy about the next game using Gemini.
+         */
+        window.getElderProphecy = async () => {
+            const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
+            const prophecyButton = document.getElementById('prophecyButton');
+            prophecyButton.disabled = true;
+
+            try {
+                const gameDoc = await getDoc(gameDocRef);
+                const gameData = gameDoc.data();
+                const score = gameData.totalScore;
+                const wordsFound = gameData.wordHistory.length;
+
+                // System Instruction: Act as the Elder Prophet.
+                // User Prompt: Write a 2-sentence prophecy about the fate of the Word Weaver team. Mention their current score [score] and how many words [wordsFound] they have found. Be grand and slightly ominous.
+                const systemPrompt = "You are the Elder Prophet. Your prophecies must be two sentences long, grand, ominous, and focus on the team's destiny based on their current achievements.";
+                const userQuery = `Write a 2-sentence prophecy about the fate of the Word Weaver team. Their current score is ${score} and they have found ${wordsFound} words. Be grand and slightly ominous, suggesting both hope and peril.`;
+                
+                const payload = {
+                    contents: [{ parts: [{ text: userQuery }] }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                };
+                
+                document.getElementById('messageBox').innerHTML = 'Invoking the Elder Prophecy...';
+                const { text: prophecyText } = await fetchGemini('gemini-2.5-flash-preview-09-2025', payload);
+
+                // Update Firestore with the new prophecy
+                await updateDoc(gameDocRef, {
+                    prophecy: prophecyText,
+                    statusMessage: 'The Prophecy has been revealed! The fate of the session is now clear.'
+                });
+
+                document.getElementById('messageBox').innerHTML = 'Prophecy delivered.';
+
+            } catch (e) {
+                console.error("Error getting prophecy:", e);
+                document.getElementById('messageBox').innerHTML = 'The Prophecy scrolls are damp with spectral dew.';
+            } finally {
+                prophecyButton.disabled = false;
+            }
+        };
+
+
+    </script>
+    <script>
+        // --- Custom Vocabulary and Initialization ---
+
+        // IMPORTANT: PASTE YOUR CUSTOM VOCABULARY LIST HERE!
+        // The array should contain objects with 'word' and 'definition' keys.
+        // The previous words were: CATACOMB, CRYPTIC, NECROPOLIS, PHANTOM, WRAITHS, etc.
+        window.VOCABULARY = [
+            { word: "Ominous", definition: "Giving the worrying impression that something bad is going to happen." },
+            { word: "Epitaph", definition: "A phrase or statement written in memory of a person who has died, especially as an inscription on a tombstone." },
+            { word: "Macabre", definition: "Disturbing and horrifying because of involvement with or depiction of death and injury." },
+            { word: "Clandestine", definition: "Kept secret or done secretively, especially because illicit." },
+            { word: "Ephemeral", definition: "Lasting for a very short time." },
+            { word: "Labyrinthine", definition: "Irregular and twisting, like a maze." },
+            { word: "Serendipity", definition: "The occurrence and development of events by chance in a happy or beneficial way." },
+            { word: "Inscrutable", definition: "Impossible to understand or interpret." },
+            { word: "Lugubrious", definition: "Looking or sounding sad and dismal." },
+            { word: "Mellifluous", definition: "Sweet or musical; pleasant to hear." }
+        ];
+
+        document.addEventListener('DOMContentLoaded', () => {
+            window.initFirebase();
+
+            // Set up button listeners
+            document.getElementById('joinButton').addEventListener('click', () => {
+                const groupCode = document.getElementById('groupCodeInput').value;
+                if (window.userId) {
+                    window.joinOrCreateGame(groupCode);
+                } else {
+                    document.getElementById('messageBox').innerHTML = 'Please wait for user authentication to complete...';
+                }
+            });
+
+            document.getElementById('startGameButton').addEventListener('click', window.startGame);
+            document.getElementById('submitGuessButton').addEventListener('click', window.submitGuess);
+            document.getElementById('hintButton').addEventListener('click', window.getOracleHint);
+            document.getElementById('prophecyButton').addEventListener('click', window.getElderProphecy);
+        });
+
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-4xl text-center creepster text-accent mb-4">
+            Word Weaver: Graveyard Spellcraft
+        </h1>
+        <p class="text-center mb-6 text-gray-400">
+            A collaborative séance. Decipher the spirits' words to complete the ritual.
+        </p>
+
+        <!-- Loading Indicator -->
+        <div id="loadingIndicator" class="hidden text-center p-4">
+            <p class="text-accent font-bold">Connecting to the Great Beyond...</p>
+        </div>
+
+        <!-- Setup Screen (Initial Group Code Entry) -->
+        <div id="setupScreen" class="hidden p-4 card">
+            <h2 class="text-2xl font-bold mb-3 text-white">Start New Séance</h2>
+            <p class="mb-3 text-sm text-gray-300">
+                Enter a unique **Group Code** (e.g., TEAM-A-GAME1) to join or create your private session.
+            </p>
+            <input type="text" id="groupCodeInput" placeholder="Enter Group Code" class="mb-3">
+            <button id="joinButton" class="btn-primary w-full">Join/Create Séance</button>
+        </div>
+
+        <!-- Game Screen (Main Game Interface) -->
+        <div id="gameScreen" class="hidden">
+            
+            <div class="flex flex-col md:flex-row gap-4 mb-4">
+                <!-- Info Panel -->
+                <div class="w-full md:w-1/3 card bg-gray-800 p-3">
+                    <h3 class="font-bold text-lg text-accent border-b border-gray-600 pb-1 mb-2">Séance Info</h3>
+                    <p class="text-sm">Group: <span id="currentGroupCode" class="font-semibold text-white"></span></p>
+                    <p class="text-sm">Round: <span id="roundDisplay" class="font-semibold text-white">0</span></p>
+                    <p class="text-sm">Score: <span id="scoreDisplay" class="font-semibold text-white">0</span></p>
+                    <p class="text-xs text-gray-500 mt-1" id="playersList">Members: 1 (ID: loading...)</p>
+                </div>
+                
+                <!-- Status Message Area -->
+                <div class="w-full md:w-2/3 card bg-gray-800 p-3">
+                    <h3 class="font-bold text-lg text-accent border-b border-gray-600 pb-1 mb-2">Spirit Board</h3>
+                    <p id="messageBox" class="text-sm mb-2 text-gray-300">Welcome, Medium. Please join a séance.</p>
+                    <p id="statusMessage" class="font-semibold text-white text-md italic"></p>
+                </div>
+            </div>
+
+            <!-- Word/Definition Area -->
+            <div class="card p-5">
+                <h2 class="text-xl font-bold mb-2">The Definition of the Unknown Word:</h2>
+                <div class="border-2 border-dashed border-gray-500 p-3 mb-4 bg-gray-700">
+                    <p id="currentDefinitionDisplay" class="text-lg italic text-gray-300">The Council must initiate the séance.</p>
+                </div>
+                <h2 class="text-xl font-bold mb-4">
+                    <span id="currentWordDisplay" class="tracking-widest text-accent text-2xl">The Word is Locked.</span>
+                </h2>
+
+                <div class="flex justify-center">
+                    <button id="startGameButton" class="btn-primary text-xl px-6 py-3">Initiate Séance</button>
+                </div>
+            </div>
+            
+            <!-- Guess Section -->
+            <div id="wordGuessSection" class="hidden card mt-4 p-5">
+                <h3 class="text-xl font-bold mb-3">Your Word Guess</h3>
+                <input type="text" id="guessInput" placeholder="Enter your secret word" class="mb-4 text-center text-lg uppercase tracking-wider">
+                <button id="submitGuessButton" class="btn-primary w-full">Vocalize Guess</button>
+            </div>
+
+            <!-- AI Tool Area -->
+            <div class="flex flex-col md:flex-row gap-4 mt-4">
+                
+                <!-- Oracle Hint -->
+                <div class="w-full md:w-1/2 card">
+                    <h3 class="font-bold text-lg mb-2 flex items-center">
+                        🔮 Oracle's Hint (AI)
+                    </h3>
+                    <div id="hintArea" class="h-16 mb-2">
+                        <p class="text-sm italic text-gray-400">The Oracle is silent. Ask for a hint to aid your focus.</p>
+                    </div>
+                    <button id="hintButton" class="btn-secondary w-full">Ask the Spirits for a Hint (Cost: 0 Points)</button>
+                </div>
+
+                <!-- Elder Prophecy -->
+                <div class="w-full md:w-1/2 card">
+                    <h3 class="font-bold text-lg mb-2 flex items-center">
+                        📜 Elder Prophecy (AI)
+                    </h3>
+                    <div id="prophecyArea" class="h-16 mb-2">
+                        <p class="text-sm text-gray-400">The Elder Prophecy has not yet been invoked.</p>
+                    </div>
+                    <button id="prophecyButton" class="btn-secondary w-full">Reveal Fate of the Game (Cost: 0 Points)</button>
+                </div>
+            </div>
+
+        </div> <!-- End Game Screen -->
+    </div>
+</body>
+</html>
