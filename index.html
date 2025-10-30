@@ -110,7 +110,11 @@
                 }
 
                 if (!firebaseConfig.apiKey) {
-                    console.error("Firebase config is missing API key. Cannot initialize.");
+                    console.error("Firebase config is missing API key. Game will run in Demo Mode: Progress will not be saved/shared.");
+                    // FALLBACK FOR EXTERNAL HOSTING: Show the setup screen immediately
+                    document.getElementById('loadingIndicator').classList.add('hidden');
+                    document.getElementById('setupScreen').classList.remove('hidden');
+                    document.getElementById('messageBox').innerHTML = 'Config missing. Demo Mode: Progress will not be saved or shared.';
                     return;
                 }
                 
@@ -147,6 +151,10 @@
 
             } catch (error) {
                 console.error("Error initializing Firebase:", error);
+                // Secondary fallback in case init fails after the config check
+                document.getElementById('loadingIndicator').classList.add('hidden');
+                document.getElementById('setupScreen').classList.remove('hidden');
+                document.getElementById('messageBox').innerHTML = 'Firebase initialization failed. Check console for details.';
             }
         };
 
@@ -172,6 +180,18 @@
                 document.getElementById('messageBox').innerHTML = 'Please enter a valid Group Code (letters/numbers/dashes only).';
                 return;
             }
+            
+            // Check if Firebase is available (it won't be in the Demo Mode fallback)
+            if (!window.db || !window.userId) {
+                document.getElementById('messageBox').innerHTML = 'Cannot save or share progress. Running in **Local Demo Mode** only.';
+                document.getElementById('setupScreen').classList.add('hidden');
+                document.getElementById('gameScreen').classList.remove('hidden');
+                document.getElementById('currentGroupCode').textContent = sanitizedCode + ' (DEMO)';
+                // In demo mode, we just start the game immediately
+                window.startGameDemo(); 
+                return;
+            }
+
 
             // Set the global GAME_ID based on the sanitized code
             window.GAME_ID = sanitizedCode;
@@ -303,9 +323,53 @@
         // --- Game Logic Actions (Executed by a single user, updating Firestore) ---
 
         /**
+         * Placeholder/Demo function when Firebase is unavailable.
+         */
+        let demoGameState = {
+            round: 0,
+            vocabIndex: 0,
+            totalScore: 0,
+            currentWord: null
+        };
+        
+        window.startGameDemo = () => {
+            demoGameState.vocabIndex = 0;
+            demoGameState.round = 1;
+            demoGameState.totalScore = 0;
+            window.nextRoundDemo();
+        }
+
+        window.nextRoundDemo = () => {
+             if (demoGameState.vocabIndex < window.VOCABULARY.length) {
+                const nextWord = window.VOCABULARY[demoGameState.vocabIndex];
+                demoGameState.currentWord = { word: nextWord.word, definition: nextWord.definition };
+                demoGameState.statusMessage = `Demo Round ${demoGameState.round}. Find the word matching this definition.`;
+                demoGameState.vocabIndex++;
+                
+                document.getElementById('roundDisplay').textContent = demoGameState.round;
+                document.getElementById('scoreDisplay').textContent = demoGameState.totalScore;
+                document.getElementById('statusMessage').innerHTML = demoGameState.statusMessage;
+                document.getElementById('currentDefinitionDisplay').textContent = demoGameState.currentWord.definition;
+                document.getElementById('currentWordDisplay').textContent = `The Hidden Word: ${demoGameState.currentWord.word.split('').map(char => char === ' ' ? ' ' : '_').join(' ')}`;
+                document.getElementById('wordGuessSection').classList.remove('hidden');
+                document.getElementById('startGameButton').classList.add('hidden');
+            } else {
+                // Demo Game Over
+                document.getElementById('statusMessage').innerHTML = `Demo Complete! Final Score: ${demoGameState.totalScore}.`;
+                document.getElementById('wordGuessSection').classList.add('hidden');
+                document.getElementById('startGameButton').classList.remove('hidden');
+            }
+        }
+        
+        /**
          * Starts the game by drawing the first word.
          */
         window.startGame = async () => {
+            if (!window.db) {
+                window.startGameDemo();
+                return;
+            }
+            
             const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
             
             // Check if game is already started via local UI check (to prevent immediate double-tap)
@@ -356,6 +420,23 @@
             guessInput.value = '';
 
             if (!userGuess) return;
+
+            // Handle Demo Mode Guess
+            if (!window.db || !window.userId) {
+                const correctWord = demoGameState.currentWord.word.toLowerCase();
+                const sanitizedGuess = userGuess.toLowerCase();
+
+                if (sanitizedGuess === correctWord) {
+                    demoGameState.totalScore += 10;
+                    demoGameState.round++;
+                    document.getElementById('messageBox').innerHTML = `Correct! +10 Points (Demo).`;
+                    window.nextRoundDemo();
+                } else {
+                     document.getElementById('messageBox').innerHTML = `Incorrect guess: "${userGuess}" (Demo). The spirits demand more focus!`;
+                }
+                return;
+            }
+
 
             const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
             
@@ -458,20 +539,28 @@
          * Generates a hint for the current word using Gemini.
          */
         window.getOracleHint = async () => {
-            const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
             const hintButton = document.getElementById('hintButton');
             hintButton.disabled = true;
 
-            try {
-                // Get the current game state
-                const gameDoc = await getDoc(gameDocRef);
-                if (!gameDoc.exists() || !gameDoc.data().currentWord) {
+            let currentDefinition;
+            if (window.db && window.GAME_ID) {
+                 const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
+                 const gameDoc = await getDoc(gameDocRef);
+                 if (!gameDoc.exists() || !gameDoc.data().currentWord) {
                     document.getElementById('messageBox').innerHTML = 'No word is active to receive a hint.';
                     hintButton.disabled = false;
                     return;
                 }
-                const currentDefinition = gameDoc.data().currentWord.definition;
-
+                currentDefinition = gameDoc.data().currentWord.definition;
+            } else if (demoGameState.currentWord) {
+                currentDefinition = demoGameState.currentWord.definition;
+            } else {
+                 document.getElementById('messageBox').innerHTML = 'No word is active to receive a hint.';
+                 hintButton.disabled = false;
+                 return;
+            }
+           
+            try {
                 // System Instruction: Act as a mysterious, cryptic Oracle.
                 // User Prompt: Create a one-sentence, highly cryptic, alliterative hint for a word defined as: [Definition]. Do not use the word itself.
                 const systemPrompt = "You are the Cryptic Oracle. Your hints must be a single sentence, highly alliterative, and deeply mysterious. Do not reveal the correct answer.";
@@ -484,14 +573,19 @@
                 
                 document.getElementById('messageBox').innerHTML = 'Consulting the Oracle...';
                 const { text: hintText } = await fetchGemini('gemini-2.5-flash-preview-09-2025', payload);
-
-                // Update Firestore with the new hint
-                await updateDoc(gameDocRef, {
-                    lastHint: hintText,
-                    statusMessage: 'The Oracle has provided a cryptic sign. Consult the message board.'
-                });
-
+                
                 document.getElementById('messageBox').innerHTML = 'Hint received.';
+
+                if (window.db && window.GAME_ID) {
+                    // Update Firestore with the new hint
+                    await updateDoc(doc(window.db, window.getGameDocPath(window.GAME_ID)), {
+                        lastHint: hintText,
+                        statusMessage: 'The Oracle has provided a cryptic sign. Consult the message board.'
+                    });
+                } else {
+                    // Update UI directly in Demo Mode
+                    document.getElementById('hintArea').innerHTML = `<p class="text-sm italic text-gray-400">Oracle's Hint: ${hintText} (Demo)</p>`;
+                }
 
             } catch (e) {
                 console.error("Error getting hint:", e);
@@ -505,16 +599,24 @@
          * Generates a prophecy about the next game using Gemini.
          */
         window.getElderProphecy = async () => {
-            const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
             const prophecyButton = document.getElementById('prophecyButton');
             prophecyButton.disabled = true;
 
-            try {
+            let score = 0;
+            let wordsFound = 0;
+
+            if (window.db && window.GAME_ID) {
+                const gameDocRef = doc(window.db, window.getGameDocPath(window.GAME_ID));
                 const gameDoc = await getDoc(gameDocRef);
                 const gameData = gameDoc.data();
-                const score = gameData.totalScore;
-                const wordsFound = gameData.wordHistory.length;
+                score = gameData.totalScore;
+                wordsFound = gameData.wordHistory.length;
+            } else {
+                score = demoGameState.totalScore;
+                wordsFound = demoGameState.vocabIndex - 1 > 0 ? demoGameState.vocabIndex - 1 : 0;
+            }
 
+            try {
                 // System Instruction: Act as the Elder Prophet.
                 // User Prompt: Write a 2-sentence prophecy about the fate of the Word Weaver team. Mention their current score [score] and how many words [wordsFound] they have found. Be grand and slightly ominous.
                 const systemPrompt = "You are the Elder Prophet. Your prophecies must be two sentences long, grand, ominous, and focus on the team's destiny based on their current achievements.";
@@ -527,14 +629,19 @@
                 
                 document.getElementById('messageBox').innerHTML = 'Invoking the Elder Prophecy...';
                 const { text: prophecyText } = await fetchGemini('gemini-2.5-flash-preview-09-2025', payload);
-
-                // Update Firestore with the new prophecy
-                await updateDoc(gameDocRef, {
-                    prophecy: prophecyText,
-                    statusMessage: 'The Prophecy has been revealed! The fate of the session is now clear.'
-                });
-
+                
                 document.getElementById('messageBox').innerHTML = 'Prophecy delivered.';
+
+                if (window.db && window.GAME_ID) {
+                    // Update Firestore with the new prophecy
+                    await updateDoc(doc(window.db, window.getGameDocPath(window.GAME_ID)), {
+                        prophecy: prophecyText,
+                        statusMessage: 'The Prophecy has been revealed! The fate of the session is now clear.'
+                    });
+                } else {
+                    // Update UI directly in Demo Mode
+                    document.getElementById('prophecyArea').innerHTML = `<p class="text-sm text-accent font-semibold">Prophecy: ${prophecyText} (Demo)</p>`;
+                }
 
             } catch (e) {
                 console.error("Error getting prophecy:", e);
@@ -571,7 +678,7 @@
             // Set up button listeners
             document.getElementById('joinButton').addEventListener('click', () => {
                 const groupCode = document.getElementById('groupCodeInput').value;
-                if (window.userId) {
+                if (window.userId || !window.db) { // Allow join if authenticated OR if in demo mode (no DB)
                     window.joinOrCreateGame(groupCode);
                 } else {
                     document.getElementById('messageBox').innerHTML = 'Please wait for user authentication to complete...';
